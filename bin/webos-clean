@@ -1,0 +1,332 @@
+#!/bin/sh
+# bin/webos-clean - CLI Principal de Debloat, Otimizacao e Resgate para LG webOS
+# Compativel com POSIX sh (Busybox / ash)
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+REPO_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
+
+# Carrega modulos
+. "$REPO_DIR/lib/common.sh"
+. "$REPO_DIR/lib/measure.sh"
+. "$REPO_DIR/lib/services.sh"
+. "$REPO_DIR/lib/preload.sh"
+. "$REPO_DIR/lib/privacy.sh"
+. "$REPO_DIR/lib/hide_apps.sh"
+. "$REPO_DIR/lib/homescreen.sh"
+. "$REPO_DIR/lib/backup.sh"
+
+STATE_DIR="${MOCK_ROOT}/var/lib/webos-clean"
+BACKUP_DIR="$STATE_DIR/backup"
+INIT_HOOK="${MOCK_ROOT}/var/lib/webosbrew/init.d/50-webos-clean"
+# Backup temporario (RAM) usado no modo --test
+TMP_BACKUP_DIR="${MOCK_ROOT}/tmp/webos_clean_backup"
+
+CLEAN_HOME=1
+ACTION=""
+ARG2=""
+
+banner() {
+    printf "%b" "$C_CYAN"
+    printf "  webOS Clean - debloat cirurgico para LG webOS\n"
+    printf "%b" "$C_RESET"
+    printf "  Otimizacao reversivel via Homebrew Channel\n\n"
+}
+
+usage() {
+    banner
+    printf "Uso: %s [MODO] [OPCOES]\n\n" "$0"
+    printf "Modos Principais:\n"
+    printf "  --test            Modo Efêmero (RAM): testa agora sem gravar no disco.\n"
+    printf "                    100%%%% reversivel reiniciando a TV ou tirando da tomada.\n"
+    printf "  --apply           Modo Permanente: aplica com backup integral e watchdog.\n"
+    printf "  --restore         Restaura 100%%%% da TV ao estado original de fabrica.\n"
+    printf "  --undo-test       Desfaz apenas o modo --test, sem reiniciar.\n"
+    printf "  --clean-home      Aplica layout limpo (somente linha de apps e entradas).\n"
+    printf "  --restore-home    Restaura o layout original da tela inicial LG.\n"
+    printf "  --backup [dir]    Empacota o ESTADO da TV (config/dados) para copiar no PC.\n"
+    printf "  --restore-backup <arquivo>  Restaura um backup de estado feito por --backup.\n"
+    printf "  --measure         Exibe consumo de RAM e processos de telemetria ativos.\n"
+    printf "  --selftest        Executa bateria de testes de integridade e saude.\n"
+    printf "  -h, --help        Exibe esta ajuda.\n\n"
+    printf "Opcoes Adicionais:\n"
+    printf "  --no-clean-home   Mantem o layout original da Home (Quick Cards e recomendacoes).\n"
+    printf "  --keep-home       Sinonimo de --no-clean-home.\n"
+    exit 0
+}
+
+# Auto-teste de integridade
+run_selftest() {
+    log_info "Iniciando auto-teste de integridade no sistema..."
+    require_root
+    ver=$(detect_webos_version)
+    log_ok "webOS detectado: versao $ver"
+
+    if [ -z "$MOCK_ROOT" ] && ! command -v "$LUNA_SEND_BIN" >/dev/null 2>&1; then
+        die "luna-send nao encontrado no sistema."
+    fi
+
+    res=$(luna_call "luna://com.webos.service.applicationmanager/getForegroundAppInfo" '{}')
+    if printf '%s' "$res" | grep -q '"returnValue":true'; then
+        log_ok "Barramento Luna e SAM operacionais."
+    else
+        log_warn "Resposta Luna inesperada: $res"
+    fi
+
+    check_disk_space
+    log_ok "Espaco em disco verificado."
+    log_ok "Auto-testes concluidos."
+}
+
+# Modo 1: Teste / Efemero (RAM)
+run_test_mode() {
+    banner
+    require_root
+    log_info "MODO DE TESTE (100% em memoria RAM). Nada e gravado no disco."
+
+    mkdir -p "$TMP_BACKUP_DIR" 2>/dev/null || true
+    measure_before
+    services_mask_transient
+    preload_set_policy false
+    preload_close_resident
+    privacy_hosts_apply "$TMP_BACKUP_DIR/hosts.bak"
+    privacy_settings_apply "$TMP_BACKUP_DIR/settings_backup.txt"
+
+    if [ "$CLEAN_HOME" = "1" ]; then
+        homescreen_apply "$TMP_BACKUP_DIR/home_original.xml" 0
+    else
+        log_info "Layout da tela inicial mantido original (--no-clean-home)."
+    fi
+
+    measure_after_and_report
+
+    printf "\n%b[SUCESSO] Modo de teste aplicado em RAM.%b\n" "$C_GREEN" "$C_RESET"
+    printf "Para desfazer TUDO: reinicie a TV ou tire da tomada.\n"
+}
+
+# Modo 2: Permanente com Backup e Watchdog
+run_apply_mode() {
+    banner
+    require_root
+    check_disk_space
+    run_selftest
+
+    log_info "Iniciando MODO PERMANENTE..."
+    mkdir -p "$BACKUP_DIR" "$STATE_DIR/bin" "$STATE_DIR/lib" 2>/dev/null || true
+
+    measure_before
+
+    services_mask_transient
+    touch "$STATE_DIR/services_masked" 2>/dev/null || true
+    preload_apply "$BACKUP_DIR"
+    preload_close_resident
+    privacy_settings_apply "$BACKUP_DIR/settings_backup.txt"
+    privacy_hosts_apply "$BACKUP_DIR/hosts.bak"
+    privacy_update_block_apply "$BACKUP_DIR/update_block.bak"
+    hide_apps_apply "$BACKUP_DIR/blocked_system_applist.json.bak"
+
+    if [ "$CLEAN_HOME" = "1" ]; then
+        homescreen_apply "$BACKUP_DIR/home_original.xml" 1
+    else
+        log_info "Layout da tela inicial mantido original (--no-clean-home)."
+    fi
+
+    # Instala scripts no diretorio permanente
+    cp -rp "$REPO_DIR/lib" "$STATE_DIR/" 2>/dev/null || true
+    cp -rp "$REPO_DIR/bin" "$STATE_DIR/" 2>/dev/null || true
+    chmod +x "$STATE_DIR/bin/webos-clean" 2>/dev/null || true
+
+    # Instala hook de boot
+    mkdir -p "$(dirname "$INIT_HOOK")" 2>/dev/null || true
+    cp -p "$REPO_DIR/init/50-webos-clean" "$INIT_HOOK" 2>/dev/null || true
+    chmod +x "$INIT_HOOK" 2>/dev/null || true
+    log_ok "Hook de boot com Watchdog instalado em $INIT_HOOK"
+
+    # Smoke test pos-instalacao
+    log_info "Verificacao pos-instalacao (Smoke Test)..."
+    sam_check=$(luna_call "luna://com.webos.service.applicationmanager/getForegroundAppInfo" '{}')
+    if [ -z "$MOCK_ROOT" ] && ! printf '%s' "$sam_check" | grep -q '"returnValue":true'; then
+        log_err "FALHA CRITICA: SAM nao respondeu! Acionando Rollback de Emergencia..."
+        run_restore_mode
+        die "Instalacao abortada e revertida por seguranca."
+    fi
+
+    measure_after_and_report
+
+    printf "\n%b[SUCESSO] Debloat Permanente concluido.%b\n" "$C_GREEN" "$C_RESET"
+    printf "Seguranca ativa:\n"
+    printf "  - Home Clean: exibindo apenas a linha de aplicativos e entradas.\n"
+    printf "  - Bloqueio de Updates: firmware OTA da LG travado por seguranca.\n"
+    printf "  - Watchdog: 2 falhas de boot seguidas => rollback automatico.\n"
+    printf "  - Resgate USB: pendrive com WEBOS_CLEAN_REVERT na raiz.\n"
+    printf "  - Manual: '%s --restore'.\n" "$0"
+}
+
+# Restauracao de fabrica
+run_restore_mode() {
+    banner
+    require_root
+    log_info "RESTAURACAO COMPLETA ao padrao de fabrica..."
+
+    rm -f "$INIT_HOOK" 2>/dev/null || true
+    log_ok "Hook de inicializacao removido."
+
+    services_unmask
+    preload_restore
+    privacy_hosts_restore "${1:-$BACKUP_DIR/hosts.bak}"
+    privacy_update_block_restore "$BACKUP_DIR/update_block.bak"
+    privacy_settings_restore "$BACKUP_DIR/settings_backup.txt"
+    hide_apps_restore "$BACKUP_DIR/blocked_system_applist.json.bak"
+    homescreen_restore "$BACKUP_DIR/home_original.xml"
+
+    rm -f "$STATE_DIR/services_masked" "$STATE_DIR/boot_fails" 2>/dev/null || true
+
+    printf "\n%b[OK] TV restaurada ao estado original.%b\n" "$C_GREEN" "$C_RESET"
+}
+
+
+# Modo Isolado: Tela Inicial Minimalista Permanente (sem mexer em servicos/apps)
+run_clean_home_isolated() {
+    banner
+    require_root
+    log_info "Aplicando Tela Inicial Minimalista de forma isolada (permanente e reversivel)..."
+    mkdir -p "$BACKUP_DIR" "$STATE_DIR/bin" "$STATE_DIR/lib" 2>/dev/null || true
+
+    # Instala scripts no diretorio permanente para sobreviver a reboots
+    cp -rp "$REPO_DIR/lib" "$STATE_DIR/" 2>/dev/null || true
+    cp -rp "$REPO_DIR/bin" "$STATE_DIR/" 2>/dev/null || true
+    chmod +x "$STATE_DIR/bin/webos-clean" 2>/dev/null || true
+
+    # Instala hook de inicializacao com watchdog
+    mkdir -p "$(dirname "$INIT_HOOK")" 2>/dev/null || true
+    cp -p "$REPO_DIR/init/50-webos-clean" "$INIT_HOOK" 2>/dev/null || true
+    chmod +x "$INIT_HOOK" 2>/dev/null || true
+    log_ok "Hook de boot com Watchdog instalado em $INIT_HOOK"
+
+    # Aplica o layout limpo (somente apps)
+    homescreen_apply "$BACKUP_DIR/home_original.xml" 1
+
+    printf "\n%b[SUCESSO] Tela inicial minimalista aplicada de forma permanente!%b\n" "$C_GREEN" "$C_RESET"
+    printf "Seguranca ativa:\n"
+    printf "  - Watchdog de boot ativo contra travamentos.\n"
+    printf "  - Resgate USB compativel (pendrive com WEBOS_CLEAN_REVERT).\n"
+    printf "  - Reversao a qualquer momento com: '%s --restore-home'\n" "$0"
+}
+
+run_restore_home_isolated() {
+    banner
+    require_root
+    log_info "Restaurando tela inicial original de fabrica..."
+
+    homescreen_restore "$BACKUP_DIR/home_original.xml"
+
+    # Se nenhum outro modulo permanente do debloat estiver ativo, remove o hook de boot e limpa state
+    if [ ! -f "$STATE_DIR/preload_off" ] && [ ! -f "$STATE_DIR/services_masked" ] && \
+       [ ! -f "$BACKUP_DIR/blocked_system_applist.json.bak" ] && [ ! -f "$BACKUP_DIR/hosts.bak" ]; then
+        rm -f "$INIT_HOOK" 2>/dev/null || true
+        rm -rf "$STATE_DIR" 2>/dev/null || true
+        log_ok "Nenhum outro modulo ativo; hook de boot e estados removidos com seguranca."
+    fi
+
+    printf "\n%b[OK] Tela inicial restaurada ao padrao oficial da LG.%b\n" "$C_GREEN" "$C_RESET"
+}
+
+# Desfaz o modo teste sem reiniciar (volta servicos, preload, hosts e home)
+run_undo_test() {
+    log_info "Desfazendo modo de teste..."
+    services_unmask
+    preload_restore
+    privacy_hosts_restore "${1:-$TMP_BACKUP_DIR/hosts.bak}"
+    privacy_settings_restore "$TMP_BACKUP_DIR/settings_backup.txt"
+    homescreen_restore "$TMP_BACKUP_DIR/home_original.xml"
+    printf "\n%b[OK] Modo de teste desfeito. Nada ficou no disco.%b\n" "$C_GREEN" "$C_RESET"
+}
+
+# Reaplicacao no boot (chamada pelo hook init.d)
+reapply_boot() {
+    [ -f "$STATE_DIR/services_masked" ] && services_mask_transient
+    [ -f "$STATE_DIR/preload_off" ] && preload_set_policy false
+    [ -f "$BACKUP_DIR/hosts.bak" ] && privacy_hosts_apply "$BACKUP_DIR/hosts.bak"
+    [ -f "$BACKUP_DIR/update_block.bak" ] && privacy_update_block_apply "$BACKUP_DIR/update_block.bak"
+    if [ -f "$STATE_DIR/clean_home" ]; then
+        homescreen_apply "$BACKUP_DIR/home_original.xml" 1
+    fi
+}
+
+# Parse de argumentos
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-clean-home|--keep-home|--full-home)
+            CLEAN_HOME=0
+            shift
+            ;;
+        --clean-home)
+            ACTION="clean_home"
+            shift
+            ;;
+        --restore-home)
+            ACTION="restore_home"
+            shift
+            ;;
+        --test|test)
+            ACTION="test"
+            shift
+            ;;
+        --apply|apply)
+            ACTION="apply"
+            shift
+            ;;
+        --restore|restore)
+            ACTION="restore"
+            shift
+            ;;
+        --undo-test)
+            ACTION="undo_test"
+            shift
+            ;;
+        --backup)
+            ACTION="backup"
+            ARG2="${2:-/tmp}"
+            shift
+            [ $# -gt 0 ] && shift || true
+            ;;
+        --restore-backup)
+            ACTION="restore_backup"
+            ARG2="${2:-}"
+            shift
+            [ $# -gt 0 ] && shift || true
+            ;;
+        --measure|measure)
+            ACTION="measure"
+            shift
+            ;;
+        --selftest|selftest)
+            ACTION="selftest"
+            shift
+            ;;
+        --reapply-boot)
+            ACTION="reapply_boot"
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            die "Opcao desconhecida: $1 (use --help)"
+            ;;
+    esac
+done
+
+case "$ACTION" in
+    test)           run_test_mode ;;
+    apply)          run_apply_mode ;;
+    restore)        run_restore_mode ;;
+    undo_test)      run_undo_test ;;
+    clean_home)     run_clean_home_isolated ;;
+    restore_home)   run_restore_home_isolated ;;
+    backup)         banner; backup_create "$ARG2" ;;
+    restore_backup) banner; backup_restore "$ARG2" ;;
+    measure)        banner; measure_after_and_report ;;
+    selftest)       banner; run_selftest ;;
+    reapply_boot)   reapply_boot ;;
+    "")             usage ;;
+esac

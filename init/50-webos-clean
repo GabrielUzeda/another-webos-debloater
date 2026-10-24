@@ -1,0 +1,91 @@
+#!/bin/sh
+# init/50-webos-clean - Hook de inicializacao para /var/lib/webosbrew/init.d/50-webos-clean
+# ATENCAO: Nao deve ter extensao .sh para compatibilidade com o run-parts.
+
+MOCK_ROOT="${MOCK_ROOT:-}"
+STATE_DIR="${MOCK_ROOT}/var/lib/webos-clean"
+FAIL_FILE="$STATE_DIR/boot_fails"
+RESTORE_SCRIPT="$STATE_DIR/bin/webos-clean"
+
+# 1. Checagem de Failsafe Fisico via USB
+check_usb_rescue() {
+    # Checa pastas montadas pelo PDM ou sistema
+    for usb_dir in "${MOCK_ROOT}"/tmp/usb/* "${MOCK_ROOT}"/tmp/usb/*/* "${MOCK_ROOT}"/media/* "${MOCK_ROOT}"/mnt/*; do
+        if [ -f "$usb_dir/WEBOS_CLEAN_REVERT" ] || [ -f "$usb_dir/REVERT_NOW" ]; then
+            printf "webos-clean: GATILHO DE RESGATE USB DETECTADO em %s! Restaurando fabrica...\n" "$usb_dir"
+            if [ -x "$RESTORE_SCRIPT" ]; then
+                "$RESTORE_SCRIPT" --restore >/dev/null 2>&1
+            fi
+            rm -f "${MOCK_ROOT}/var/lib/webosbrew/init.d/50-webos-clean" 2>/dev/null || true
+            exit 0
+        fi
+    done
+
+    # Fallback de hardware: se o PDM ainda nao montou no boot precoce, monta /dev/sd* em modo ro
+    if [ -z "$MOCK_ROOT" ]; then
+        for dev in /dev/sd[a-z][0-9] /dev/sd[a-z]; do
+            [ -b "$dev" ] || continue
+            check_dir="/tmp/usb_rescue_check"
+            mkdir -p "$check_dir" 2>/dev/null || continue
+            if mount -o ro "$dev" "$check_dir" 2>/dev/null; then
+                if [ -f "$check_dir/WEBOS_CLEAN_REVERT" ] || [ -f "$check_dir/REVERT_NOW" ]; then
+                    printf "webos-clean: GATILHO DE RESGATE USB DETECTADO no dispositivo %s! Restaurando...\n" "$dev"
+                    umount "$check_dir" 2>/dev/null || true
+                    rm -rf "$check_dir" 2>/dev/null || true
+                    if [ -x "$RESTORE_SCRIPT" ]; then
+                        "$RESTORE_SCRIPT" --restore >/dev/null 2>&1
+                    fi
+                    rm -f "/var/lib/webosbrew/init.d/50-webos-clean" 2>/dev/null || true
+                    exit 0
+                fi
+                umount "$check_dir" 2>/dev/null || true
+            fi
+            rm -rf "$check_dir" 2>/dev/null || true
+        done
+    fi
+}
+
+# 2. Watchdog de Boot (Dead-man's Switch contra Bootloop)
+check_boot_watchdog() {
+    mkdir -p "$STATE_DIR" 2>/dev/null || true
+    fails=0
+    if [ -f "$FAIL_FILE" ]; then
+        fails=$(cat "$FAIL_FILE" 2>/dev/null || echo 0)
+    fi
+
+    # Se falhou 2 vezes seguidas sem boot completo, ativa auto-rollback
+    if [ "$fails" -ge 2 ] 2>/dev/null; then
+        printf "webos-clean: DETECTADAS %s FALHAS CONSECUTIVAS DE BOOT! Executando auto-rollback...\n" "$fails"
+        if [ -x "$RESTORE_SCRIPT" ]; then
+            "$RESTORE_SCRIPT" --restore >/dev/null 2>&1
+        fi
+        rm -f "$FAIL_FILE" 2>/dev/null || true
+        rm -f "${MOCK_ROOT}/var/lib/webosbrew/init.d/50-webos-clean" 2>/dev/null || true
+        exit 0
+    fi
+
+    # Incrementa contador de falhas
+    fails=$((fails + 1))
+    echo "$fails" > "$FAIL_FILE"
+}
+
+# Executa checagens
+check_usb_rescue
+check_boot_watchdog
+
+# Re-aplica mascaras de servicos, preload e hosts no boot
+if [ -x "$RESTORE_SCRIPT" ]; then
+    "$RESTORE_SCRIPT" --reapply-boot >/dev/null 2>&1
+fi
+
+# Rotina em background para confirmar boot saudavel (nao trava a inicializacao)
+if [ -z "$MOCK_ROOT" ]; then
+    (
+        sleep 45
+        # Testa se o SAM responde
+        res=$(luna-send -i -n 1 -w 3000 luna://com.webos.service.applicationmanager/getForegroundAppInfo '{}' 2>/dev/null)
+        if echo "$res" | grep -q '"returnValue":true'; then
+            echo "0" > "$FAIL_FILE"
+        fi
+    ) &
+fi
