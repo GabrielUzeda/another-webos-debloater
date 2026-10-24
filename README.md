@@ -7,6 +7,29 @@ Synthesizes and improves upon the best techniques from `gist-lucataco`, `glassho
 
 ---
 
+## ✅ Requirements
+
+### On the television
+| Requirement | Detail |
+| :--- | :--- |
+| **LG webOS TV** | webOS 4.x or newer. Validated on **webOS 10.3.1** (aarch64, 2 GB RAM). Feature differences: webOS 10+ uses the OverlayFS Home Screen path, webOS 9 falls back to the manifest XML path, and daemon masking uses `systemctl` (Upstart fallback on webOS 3). |
+| **Root access** | Mandatory. Provided by **Homebrew Channel** (RootMyTV / Crashd exploit). The boot hook needs a writable `/var/lib/webosbrew/init.d/`. Without root every action aborts immediately. |
+| **Remote shell** | Working **telnet** (port 23) or **SSH** (port 22) login as root. Verify it *before* running anything, since it is your recovery path. |
+| **Free space in `/var`** | At least **2 MB** for state snapshots and the boot counter (`--selftest` and every run check this). SquashFS partitions are never written. |
+| **Native binaries** | Only utilities already shipped with webOS: `luna-send`, `systemctl`, `mount`/`umount` (OverlayFS + tmpfs), `tar`, `awk`, `sed`, `grep`, `od`, `sha256sum`, `df` (BusyBox / ash). **Nothing to install on the TV — no Node.js, no Python, no daemons.** |
+
+### On your computer (only for the helper tools and the test suite)
+| Requirement | Needed by |
+| :--- | :--- |
+| POSIX `sh`, `tar`, `sha256sum`, `nc` (netcat) | `tools/pull-backup.sh` (streams the backup over TCP 9000, listens locally) |
+| `python3` | `tools/deploy_to_tv.sh` (local HTTP server for deployment) |
+| `telnet` (or `nc`) | `test/tv_exec.sh` remote execution bridge and on-device integration runs |
+| Nothing else | `test/run-tests.sh` is fully offline and runs on any POSIX shell |
+
+> ⚠️ **Not included by design:** restoring raw state tarballs onto a live system (`--restore-backup`) is disabled (`BACKUP_RESTORE_ENABLED=0`). Use `--restore` or LG's official factory reset instead.
+
+---
+
 ## ⚠️ Legal Disclaimer & Risk Notice
 
 **USE STRICTLY AT YOUR OWN RISK. THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR NONINFRINGEMENT.**
