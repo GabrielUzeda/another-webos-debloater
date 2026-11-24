@@ -10,6 +10,11 @@ com.webos.service.mycar.service
 contentminer.service
 nudge.service
 remotelogger.service
+crashd.service
+hybridtv-manager.service
+voiceconductor.service
+voiceinput.service
+com.webos.service.microphone.service
 '
 
 UPSTART_LIST='
