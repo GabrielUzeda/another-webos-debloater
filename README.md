@@ -12,7 +12,7 @@ Synthesizes and improves upon the best techniques from `gist-lucataco`, `glassho
 ### On the television
 | Requirement | Detail |
 | :--- | :--- |
-| **LG webOS TV** | webOS 4.x or newer. Validated on **webOS 10.3.1** (aarch64, 2 GB RAM). Feature differences: webOS 10+ uses the OverlayFS Home Screen path, webOS 9 falls back to the manifest XML path, and daemon masking uses `systemctl` (Upstart fallback on webOS 3). |
+| **LG webOS TV** | webOS 4.x or newer. Validated on **webOS 10.3.1** (aarch64, 2 GB RAM) and on **webOS 10.3.2 / "webOS25"** (LG 43UT8000PSA, rooted via SlopBro). Feature differences: webOS 10+ uses the OverlayFS Home Screen path, webOS 9 falls back to the manifest XML path, and daemon masking uses `systemctl` (Upstart fallback on webOS 3). On webOS25, `luna-send` (and therefore every `setSystemSettings` key used by `privacy_settings_apply()`) only prints a result when it has a controlling tty — see #1 for the fix. |
 | **Root access** | Mandatory. Provided by **Homebrew Channel** (RootMyTV / Crashd exploit). The boot hook needs a writable `/var/lib/webosbrew/init.d/`. Without root every action aborts immediately. |
 | **Remote shell** | Working **telnet** (port 23) or **SSH** (port 22) login as root. Verify it *before* running anything, since it is your recovery path. |
 | **Free space in `/var`** | At least **2 MB** for state snapshots and the boot counter (`--selftest` and every run check this). SquashFS partitions are never written. |
