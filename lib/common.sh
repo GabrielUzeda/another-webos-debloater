@@ -97,6 +97,31 @@ get_blocked_list_file() {
     echo "$apps_dir/$region.json"
 }
 
+# luna-send only prints its response when stdout has a controlling
+# terminal (isatty). Running it over a non-interactive SSH session (e.g.
+# `ssh host 'webos-clean --apply'`, cron, or any automation) makes it exit
+# with code 0 but print nothing, so luna_call() looks like it succeeded
+# with an empty response. This silently breaks the privacy settings and
+# can trigger a false positive in the --apply Smoke Test (SAM "not
+# responding" -> unnecessary rollback).
+# `script` (util-linux) creates a local pty and fixes this regardless of
+# how the script itself was invoked (SSH with or without -tt, cron, etc).
+# Tested and confirmed on real hardware (webOS 10.3.2 / "webOS25").
+SCRIPT_BIN="${SCRIPT_BIN:-$(command -v script 2>/dev/null)}"
+
+# Runs a command through a simulated pty when `script` is available,
+# falling back to direct execution (best effort) otherwise.
+_run_via_pty() {
+    # $1 is already a ready-to-run command string (its own internal args
+    # are already single-quoted by the caller); it just needs to be
+    # passed as ONE argument here, without re-escaping.
+    if [ -n "$SCRIPT_BIN" ] && [ -x "$SCRIPT_BIN" ]; then
+        "$SCRIPT_BIN" -qc "$1" /dev/null 2>/dev/null
+    else
+        eval "$1" 2>/dev/null
+    fi
+}
+
 # Chamada ao barramento Luna com suporte a SERVICE_MAP e timeout
 luna_call() {
     uri="$1"
@@ -118,10 +143,15 @@ luna_call() {
     if [ -n "$MOCK_LUNA_CMD" ]; then
         out=$($MOCK_LUNA_CMD "$target_uri" "$payload" 2>/dev/null)
     elif [ -x "$LUNA_SEND_BIN" ]; then
-        out=$("$LUNA_SEND_BIN" -i -n 1 -w 3000 "$target_uri" "$payload" 2>/dev/null)
+        esc_uri=$(printf '%s' "$target_uri" | sed "s/'/'\\\\''/g")
+        esc_payload=$(printf '%s' "$payload" | sed "s/'/'\\\\''/g")
+        cmd="'$LUNA_SEND_BIN' -i -n 1 -w 3000 '$esc_uri' '$esc_payload'"
+        out=$(_run_via_pty "$cmd")
         # Se retornou erro de servico inexistente e existe versao legada, tenta fallback
         if [ -n "$legacy_uri" ] && echo "$out" | grep -q "Service does not exist"; then
-            out=$("$LUNA_SEND_BIN" -i -n 1 -w 3000 "$legacy_uri" "$payload" 2>/dev/null)
+            esc_legacy=$(printf '%s' "$legacy_uri" | sed "s/'/'\\\\''/g")
+            cmd="'$LUNA_SEND_BIN' -i -n 1 -w 3000 '$esc_legacy' '$esc_payload'"
+            out=$(_run_via_pty "$cmd")
         fi
     else
         out='{"returnValue":false,"errorText":"luna-send not available"}'
